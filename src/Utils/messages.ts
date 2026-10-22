@@ -817,7 +817,22 @@ export const normalizeMessageContent = (content: WAMessageContent | null | undef
 			message?.editedMessage ||
 			message?.associatedChildMessage ||
 			message?.groupStatusMessage ||
-			message?.groupStatusMessageV2
+			message?.groupStatusMessageV2 ||
+			// wrappers @itsliaaa/baileys also unwraps; the Arkon Bot reads stickers, bot replies and status mentions through them
+			message?.botForwardedMessage ||
+			message?.botInvokeMessage ||
+			message?.botTaskMessage ||
+			message?.eventCoverImage ||
+			message?.groupMentionedMessage ||
+			message?.groupStatusMentionMessage ||
+			message?.limitSharingMessage ||
+			message?.lottieStickerMessage ||
+			message?.pollCreationMessageV4 ||
+			message?.pollCreationOptionImageMessage ||
+			message?.questionMessage ||
+			message?.questionReplyMessage ||
+			message?.statusAddYours ||
+			message?.statusMentionMessage
 		)
 	}
 }

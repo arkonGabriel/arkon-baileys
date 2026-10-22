@@ -5,6 +5,16 @@ import type { AnyMessageContent, MessageContentGenerationOptions, WAMessageConte
 import { prepareWAMessageMedia } from '../Utils/messages'
 import { shouldIncludeReportingToken } from '../Utils/reporting-utils'
 import { ARKON_FALLBACK_URL, ARKON_LIBRARY_NAME } from './constants'
+import {
+	type ArkonProductContent,
+	EXTRA_CONTENT_KEYS,
+	isArkonPoll,
+	prepareExtraContent,
+	prepareInvoiceMessage,
+	preparePollMessage,
+	prepareProductMessage,
+	prepareRequestPaymentMessage
+} from './extra-content'
 import { prepareNativeFlowButtons } from './native-flow'
 import { prepareStickerPackMessage, type StickerPackContent } from './sticker-pack'
 import type { ArkonCard, ArkonMessageContent } from './types'
@@ -29,7 +39,11 @@ const ARKON_TRIGGER_KEYS = [
 	'interactiveAsTemplate',
 	'ephemeral',
 	'viewOnceV2',
-	'viewOnceV2Extension'
+	'viewOnceV2Extension',
+	'isLottie',
+	'requestPaymentFrom',
+	'invoiceNote',
+	...EXTRA_CONTENT_KEYS
 ] as const
 
 /** applied by the Arkon builder itself, after the interactive wrapping, so they are kept from the stock generator */
@@ -50,7 +64,10 @@ const isTruthy = (obj: object, key: string) => has(obj, key) && !!(obj as Record
 export const isArkonMessageContent = (message: unknown): message is ArkonMessageContent =>
 	typeof message === 'object' &&
 	message !== null &&
-	(ARKON_TRIGGER_KEYS.some(key => isTruthy(message, key)) || Array.isArray((message as { album?: unknown }).album))
+	(ARKON_TRIGGER_KEYS.some(key => isTruthy(message, key)) ||
+		has(message, 'paymentInviteServiceType') ||
+		Array.isArray((message as { album?: unknown }).album) ||
+		isArkonPoll((message as { poll?: unknown }).poll))
 
 const firstContent = (m: WAMessageContent) => {
 	const type = Object.keys(m)[0] as keyof proto.IMessage
@@ -81,12 +98,26 @@ const generateBaseContent = async (
 		return { albumMessage: { expectedImageCount: imageCount, expectedVideoCount: videoCount } }
 	}
 
+	const extra = await prepareExtraContent(message, options)
+	if (extra) {
+		return extra
+	}
+
+	if (isArkonPoll(message.poll)) {
+		return preparePollMessage(message.poll)
+	}
+
 	const core: Record<string, unknown> = { ...message }
 	for (const key of [...ARKON_TRIGGER_KEYS, ...DECORATOR_KEYS]) {
 		delete core[key]
 	}
 
 	const m: WAMessageContent = { ...(await generate(core as AnyMessageContent, options)) }
+	// a lottie sticker also carries the flag on the sticker itself
+	if (message.isLottie && m.stickerMessage) {
+		m.stickerMessage.isLottie = true
+	}
+
 	// the stock generator adds a reporting secret at the top level; it is added again once the message is wrapped
 	if (!OWN_CONTEXT_INFO_KEYS.some(key => has(core, key))) {
 		delete m.messageContextInfo
@@ -267,7 +298,7 @@ const buildCard = async (
 ): Promise<proto.Message.IInteractiveMessage> => {
 	let header: WAMessageContent = {}
 	if (has(card, 'product')) {
-		throw new Boom('Product cards are not supported yet', { statusCode: 400 })
+		header.productMessage = await prepareProductMessage(card as unknown as ArkonProductContent, options)
 	} else {
 		header = await prepareWAMessageMedia(card as Parameters<typeof prepareWAMessageMedia>[0], options).catch(() => ({}))
 	}
@@ -366,6 +397,13 @@ export const generateArkonMessageContent = async (
 	options: MessageContentGenerationOptions,
 	generate: ContentGenerator
 ) => {
+	if (message.raw) {
+		// the caller built the proto by hand; it is sent as given
+		const content: Record<string, unknown> = { ...message }
+		delete content.raw
+		return proto.Message.create(content as proto.IMessage)
+	}
+
 	let m = await generateBaseContent(message, options, generate)
 
 	if (has(message, 'buttons')) {
@@ -378,6 +416,10 @@ export const generateArkonMessageContent = async (
 		m = await buildNativeFlowMessage(message, m, options)
 	} else if (has(message, 'cards')) {
 		m = await buildCarouselMessage(message, options)
+	} else if (has(message, 'requestPaymentFrom')) {
+		m = prepareRequestPaymentMessage(message as ArkonMessageContent & { requestPaymentFrom: string }, m)
+	} else if (has(message, 'invoiceNote')) {
+		m = prepareInvoiceMessage(message.invoiceNote as string, m)
 	}
 
 	if (isTruthy(message, 'externalAdReply')) {
@@ -437,7 +479,9 @@ export const generateArkonMessageContent = async (
 		m = { ephemeralMessage: { message: m } }
 	}
 
-	if (message.viewOnce) {
+	if (message.isLottie) {
+		m = { lottieStickerMessage: { message: m } }
+	} else if (message.viewOnce) {
 		m = { viewOnceMessage: { message: m } }
 	} else if (message.viewOnceV2) {
 		m = { viewOnceMessageV2: { message: m } }
