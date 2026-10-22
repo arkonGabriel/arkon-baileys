@@ -1,6 +1,8 @@
 import NodeCache from '@cacheable/node-cache'
 import { Boom } from '@hapi/boom'
 import { proto } from '../../WAProto/index.js'
+import { getBizBinaryNode, shouldIncludeBizBinaryNode } from '../Arkon/biz-node'
+import { ALBUM_ITEM_DELAY_MS } from '../Arkon/constants'
 import { DEFAULT_CACHE_TTLS, WA_DEFAULT_EPHEMERAL } from '../Defaults'
 import type {
 	AnyMessageContent,
@@ -19,6 +21,7 @@ import {
 	bindWaitForEvent,
 	decryptMediaRetryData,
 	DEF_MEDIA_HOST,
+	delay,
 	encodeNewsletterMessage,
 	encodeSignedDeviceIdentity,
 	encodeWAMessage,
@@ -706,6 +709,11 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				extraAttrs['decrypt-fail'] = 'hide' // todo: expand for reactions and other types
 			}
 
+			// a group status is only rendered as one when the stanza is flagged as such
+			if (message.groupStatusMessage || message.groupStatusMessageV2) {
+				binaryNodeContent.push({ tag: 'meta', attrs: { is_group_status: 'true' } })
+			}
+
 			if (isGroupOrStatus && !isRetryResend) {
 				const [groupData, senderKeyMap] = await Promise.all([
 					(async () => {
@@ -1092,6 +1100,12 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				;(stanza.content as BinaryNode[]).push(...additionalNodes)
 			}
 
+			const innerMessage = normalizeMessageContent(message)
+			const hasBizNode = !!additionalNodes?.some(node => node.tag === 'biz')
+			if (innerMessage && !hasBizNode && shouldIncludeBizBinaryNode(innerMessage)) {
+				;(stanza.content as BinaryNode[]).push(getBizBinaryNode(innerMessage))
+			}
+
 			logger.debug({ msgId }, `sending message to ${participants.length} devices`)
 
 			await sendNode(stanza)
@@ -1210,6 +1224,10 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			return 'native_flow_response'
 		} else if (message.groupInviteMessage) {
 			return 'url'
+		} else if (message.albumMessage) {
+			return 'collection'
+		} else if (message.stickerPackMessage) {
+			return 'sticker_pack'
 		}
 
 		return ''
@@ -1410,6 +1428,47 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					process.nextTick(async () => {
 						await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'))
 					})
+				}
+
+				if ('album' in content && Array.isArray(content.album)) {
+					// each item is its own message tied to the album header sent above
+					for (const item of content.album) {
+						const albumMsg = await generateWAMessage(jid, item as AnyMessageContent, {
+							logger,
+							userJid,
+							upload: waUploadToServer,
+							mediaCache: config.mediaCache,
+							options: config.options,
+							...options,
+							messageId: generateMessageIDV2(userJid)
+						})
+						const albumContent = normalizeMessageContent(albumMsg.message)
+						if (!albumContent?.imageMessage && !albumContent?.videoMessage) {
+							throw new Boom('Album items must be images or videos', { statusCode: 400 })
+						}
+
+						albumMsg.message!.messageContextInfo = {
+							...albumMsg.message!.messageContextInfo,
+							messageAssociation: {
+								parentMessageKey: fullMsg.key,
+								associationType: proto.MessageAssociation.AssociationType.MEDIA_ALBUM
+							}
+						}
+						await relayMessage(jid, albumMsg.message!, {
+							messageId: albumMsg.key.id!,
+							useCachedGroupMetadata: options.useCachedGroupMetadata,
+							statusJidList: options.statusJidList,
+							additionalAttributes,
+							additionalNodes
+						})
+						if (config.emitOwnEvents) {
+							process.nextTick(async () => {
+								await messageMutex.mutex(() => upsertMessage(albumMsg, 'append'))
+							})
+						}
+
+						await delay(ALBUM_ITEM_DELAY_MS)
+					}
 				}
 
 				return fullMsg

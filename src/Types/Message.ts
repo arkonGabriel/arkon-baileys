@@ -1,6 +1,7 @@
 import type { Readable } from 'stream'
 import type { URL } from 'url'
 import { proto } from '../../WAProto/index.js'
+import type { ArkonMessageContent } from '../Arkon/types'
 import type { MediaType } from '../Defaults'
 import type { BinaryNode } from '../WABinary'
 import type { GroupMetadata } from './GroupMetadata'
@@ -302,6 +303,7 @@ export type AnyMessageContent =
 	| {
 			limitSharing: boolean
 	  }
+	| ArkonMessageContent
 
 export type GroupMetadataParticipants = Pick<GroupMetadata, 'participants'>
 
