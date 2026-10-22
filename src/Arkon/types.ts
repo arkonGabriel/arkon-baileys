@@ -150,6 +150,8 @@ export type ArkonMessageContent = ArkonNativeFlowOptions & {
 	/** send the rest of the object as the message proto, untouched */
 	raw?: boolean
 	isLottie?: boolean
+	/** site icon next to the link preview of a text message */
+	favicon?: WAMediaUpload
 	/** AI icon on the message; private chats only */
 	ai?: boolean
 	keep?: WAMessageKey

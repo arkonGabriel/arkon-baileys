@@ -1,5 +1,5 @@
 import { Boom } from '@hapi/boom'
-import { exec } from 'child_process'
+import { spawn } from 'child_process'
 import * as Crypto from 'crypto'
 import { once } from 'events'
 import { createReadStream, createWriteStream, promises as fs, WriteStream } from 'fs'
@@ -10,7 +10,13 @@ import { join } from 'path'
 import { Readable, Transform } from 'stream'
 import { URL } from 'url'
 import { proto } from '../../WAProto/index.js'
-import { DEFAULT_ORIGIN, MEDIA_HKDF_KEY_MAPPING, MEDIA_PATH_MAP, type MediaType } from '../Defaults'
+import {
+	DEFAULT_ORIGIN,
+	MEDIA_HKDF_KEY_MAPPING,
+	MEDIA_PATH_MAP,
+	type MediaType,
+	NEWSLETTER_MEDIA_PATH_MAP
+} from '../Defaults'
 import type {
 	BaileysEventMap,
 	DownloadableMessage,
@@ -31,19 +37,36 @@ import type { ILogger } from './logger'
 
 const getTmpFilesDirectory = () => tmpdir()
 
-const getImageProcessingLibrary = async () => {
-	//@ts-ignore
-	const [jimp, sharp] = await Promise.all([import('jimp').catch(() => {}), import('sharp').catch(() => {})])
+type ImageProcessingLibrary = { sharp: any } | { image: any } | { jimp: any }
+
+let imageProcessingLibrary: ImageProcessingLibrary | undefined
+
+/** the first installed of sharp, @napi-rs/image and jimp, looked up once */
+export const getImageProcessingLibrary = async (): Promise<ImageProcessingLibrary> => {
+	if (imageProcessingLibrary) {
+		return imageProcessingLibrary
+	}
+
+	const [sharp, image, jimp] = await Promise.all([
+		//@ts-ignore optional dependency
+		import('sharp').catch(() => {}),
+		//@ts-ignore optional dependency
+		import('@napi-rs/image').catch(() => {}),
+		//@ts-ignore optional dependency
+		import('jimp').catch(() => {})
+	])
 
 	if (sharp) {
-		return { sharp }
+		imageProcessingLibrary = { sharp }
+	} else if (image) {
+		imageProcessingLibrary = { image }
+	} else if (jimp) {
+		imageProcessingLibrary = { jimp }
+	} else {
+		throw new Boom('No image processing library available')
 	}
 
-	if (jimp) {
-		return { jimp }
-	}
-
-	throw new Boom('No image processing library available')
+	return imageProcessingLibrary
 }
 
 export const hkdfInfoKey = (type: MediaType) => {
@@ -114,23 +137,48 @@ export async function getMediaKeys(
 	}
 }
 
-/** Extracts video thumb using FFMPEG */
-const extractVideoThumb = async (
-	path: string,
-	destPath: string,
-	time: string,
-	size: { width: number; height: number }
-) =>
-	new Promise<void>((resolve, reject) => {
-		const cmd = `ffmpeg -ss ${time} -i ${path} -y -vf scale=${size.width}:-1 -vframes 1 -f image2 ${destPath}`
-		exec(cmd, err => {
-			if (err) {
-				reject(err)
-			} else {
-				resolve()
-			}
-		})
-	})
+/**
+ * Extracts a video frame as JPEG using FFMPEG. The arguments go straight to the process, never
+ * through a shell, so a file path cannot inject commands.
+ */
+export const extractVideoThumb = async (path: string, time: string, size: { width: number; height: number }) => {
+	const ffmpeg = spawn(
+		'ffmpeg',
+		[
+			'-loglevel',
+			'error',
+			'-ss',
+			time,
+			'-i',
+			path,
+			'-an',
+			'-sn',
+			'-dn',
+			'-map_metadata',
+			'-1',
+			'-vf',
+			`scale=${size.width}:-1`,
+			'-frames:v',
+			'1',
+			'-c:v',
+			'mjpeg',
+			'-f',
+			'image2pipe',
+			'pipe:1'
+		],
+		{ stdio: ['ignore', 'pipe', 'pipe'] }
+	)
+	const chunks: Buffer[] = []
+	const stderrChunks: Buffer[] = []
+	ffmpeg.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+	ffmpeg.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk))
+	const [code] = await once(ffmpeg, 'close')
+	if (code !== 0) {
+		throw new Boom(`FFmpeg failed (code ${code}):\n` + Buffer.concat(stderrChunks).toString('utf8'))
+	}
+
+	return Buffer.concat(chunks)
+}
 
 export const extractImageThumb = async (bufferOrFilePath: Readable | Buffer | string, width = 32) => {
 	// TODO: Move entirely to sharp, removing jimp as it supports readable streams
@@ -152,8 +200,23 @@ export const extractImageThumb = async (bufferOrFilePath: Readable | Buffer | st
 				height: dimensions.height
 			}
 		}
-	} else if ('jimp' in lib && typeof lib.jimp?.Jimp === 'object') {
-		const jimp = await (lib.jimp.Jimp as any).read(bufferOrFilePath)
+	} else if ('image' in lib && lib.image?.Transformer) {
+		if (!Buffer.isBuffer(bufferOrFilePath)) {
+			bufferOrFilePath = await fs.readFile(bufferOrFilePath)
+		}
+
+		const img = new lib.image.Transformer(bufferOrFilePath)
+		const dimensions = await img.metadata()
+		const buffer: Buffer = await img.resize(width, undefined, 0).jpeg(50)
+		return {
+			buffer,
+			original: {
+				width: dimensions.width as number | undefined,
+				height: dimensions.height as number | undefined
+			}
+		}
+	} else if ('jimp' in lib && lib.jimp?.Jimp) {
+		const jimp = await lib.jimp.Jimp.read(bufferOrFilePath)
 		const dimensions = {
 			width: jimp.width,
 			height: jimp.height
@@ -179,7 +242,7 @@ export const generateProfilePicture = async (
 ) => {
 	let buffer: Buffer
 
-	const { width: w = 640, height: h = 640 } = dimensions || {}
+	const { width: w = 720, height: h = 720 } = dimensions || {}
 
 	if (Buffer.isBuffer(mediaUpload)) {
 		buffer = mediaUpload
@@ -197,15 +260,17 @@ export const generateProfilePicture = async (
 			.default(buffer)
 			.resize(w, h)
 			.jpeg({
-				quality: 50
+				quality: 80
 			})
 			.toBuffer()
-	} else if ('jimp' in lib && typeof lib.jimp?.Jimp === 'function') {
-		const jimp = await (lib.jimp.Jimp as any).read(buffer)
+	} else if ('image' in lib && lib.image?.Transformer) {
+		img = new lib.image.Transformer(buffer).resize(w, h, 0).jpeg(80)
+	} else if ('jimp' in lib && lib.jimp?.Jimp) {
+		const jimp = await lib.jimp.Jimp.read(buffer)
 		const min = Math.min(jimp.width, jimp.height)
 		const cropped = jimp.crop({ x: 0, y: 0, w: min, h: min })
 
-		img = cropped.resize({ w, h, mode: lib.jimp.ResizeStrategy.BILINEAR }).getBuffer('image/jpeg', { quality: 50 })
+		img = cropped.resize({ w, h, mode: lib.jimp.ResizeStrategy.BILINEAR }).getBuffer('image/jpeg', { quality: 80 })
 	} else {
 		throw new Boom('No image processing library available')
 	}
@@ -344,13 +409,9 @@ export async function generateThumbnail(
 			}
 		}
 	} else if (mediaType === 'video') {
-		const imgFilename = join(getTmpFilesDirectory(), generateMessageIDV2() + '.jpg')
 		try {
-			await extractVideoThumb(file, imgFilename, '00:00:00', { width: 32, height: 32 })
-			const buff = await fs.readFile(imgFilename)
+			const buff = await extractVideoThumb(file, '00:00:00', { width: 32, height: 32 })
 			thumbnail = buff.toString('base64')
-
-			await fs.unlink(imgFilename)
 		} catch (err) {
 			options.logger?.debug('could not generate video thumb: ' + err)
 		}
@@ -683,6 +744,7 @@ type MediaUploadResult = {
 	meta_hmac?: string
 	ts?: number
 	fbid?: number
+	thumbnail_info?: { thumbnail_direct_path?: string; thumbnail_sha256?: string }
 }
 
 export type UploadParams = {
@@ -829,11 +891,11 @@ export const getWAUploadToServer = (
 	{ customUploadHosts, fetchAgent, logger, options }: SocketConfig,
 	refreshMediaConn: (force: boolean) => Promise<MediaConnInfo>
 ): WAMediaUploadFunction => {
-	return async (filePath, { mediaType, fileEncSha256B64, timeoutMs }) => {
+	return async (filePath, { mediaType, fileEncSha256B64, timeoutMs, newsletter }) => {
 		// send a query JSON to obtain the url & auth token to upload our media
 		let uploadInfo = await refreshMediaConn(false)
 
-		let urls: { mediaUrl: string; directPath: string; meta_hmac?: string; ts?: number; fbid?: number } | undefined
+		let urls: Awaited<ReturnType<WAMediaUploadFunction>> | undefined
 		const hosts = [...customUploadHosts, ...uploadInfo.hosts]
 
 		fileEncSha256B64 = encodeBase64EncodedStringForUpload(fileEncSha256B64)
@@ -855,7 +917,10 @@ export const getWAUploadToServer = (
 			logger.debug(`uploading to "${hostname}"`)
 
 			const auth = encodeURIComponent(uploadInfo.auth)
-			const url = `https://${hostname}${MEDIA_PATH_MAP[mediaType]}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}`
+			// newsletter media has its own paths, and the server makes its thumbnail
+			const mediaPath = (newsletter ? NEWSLETTER_MEDIA_PATH_MAP : MEDIA_PATH_MAP)[mediaType]
+			const serverThumb = newsletter ? '&server_thumb_gen=1' : ''
+			const url = `https://${hostname}${mediaPath}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}${serverThumb}`
 
 			let result: MediaUploadResult | undefined
 			try {
@@ -876,7 +941,9 @@ export const getWAUploadToServer = (
 						directPath: result.direct_path!,
 						meta_hmac: result.meta_hmac,
 						fbid: result.fbid,
-						ts: result.ts
+						ts: result.ts,
+						thumbnailDirectPath: result.thumbnail_info?.thumbnail_direct_path,
+						thumbnailSha256: result.thumbnail_info?.thumbnail_sha256
 					}
 					break
 				} else {

@@ -26,6 +26,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@arkon/baileys@workspace:."
   dependencies:
+    "@adiwajshing/keyed-db": "npm:^0.2.4"
     "@cacheable/node-cache": "npm:^1.4.0"
     "@eslint/eslintrc": "npm:^3.3.1"
     "@eslint/js": "npm:^9.31.0"

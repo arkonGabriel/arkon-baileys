@@ -107,6 +107,13 @@ export function makeCacheableSignalKeyStore(
 }
 
 /**
+ * One instance per process: a per-store AsyncLocalStorage leaks the heap under Node's legacy
+ * async-context propagation, where every live instance tags every pending async resource.
+ * Contexts are keyed by store, so a store only sees its own even inside another store's transaction.
+ */
+const sharedTxStorage = new AsyncLocalStorage<Map<symbol, TransactionContext>>()
+
+/**
  * Adds DB-like transaction capability to the SignalKeyStore
  * Uses AsyncLocalStorage for automatic context management
  * @param state the key store to apply this capability to
@@ -118,7 +125,15 @@ export const addTransactionCapability = (
 	logger: ILogger,
 	{ maxCommitRetries, delayBetweenTriesMs }: TransactionCapabilityOptions
 ): SignalKeyStoreWithTransaction => {
-	const txStorage = new AsyncLocalStorage<TransactionContext>()
+	const storeToken = Symbol('signal-key-store')
+	const txStorage = {
+		getStore: () => sharedTxStorage.getStore()?.get(storeToken),
+		run: <T>(ctx: TransactionContext, work: () => T) => {
+			const contexts = new Map(sharedTxStorage.getStore())
+			contexts.set(storeToken, ctx)
+			return sharedTxStorage.run(contexts, work)
+		}
+	}
 
 	// Queues for concurrency control (keyed by signal data type - bounded set)
 	const keyQueues = new Map<string, PQueue>()

@@ -18,6 +18,7 @@ import {
 import { prepareNativeFlowButtons } from './native-flow'
 import { prepareStickerPackMessage, type StickerPackContent } from './sticker-pack'
 import type { ArkonCard, ArkonMessageContent } from './types'
+import { hasValidCarouselHeader, hasValidInteractiveHeader } from './validators'
 
 const { ButtonsMessage, InteractiveMessage, ListMessage } = proto.Message
 const ButtonType = ButtonsMessage.Button.Type
@@ -41,6 +42,7 @@ const ARKON_TRIGGER_KEYS = [
 	'viewOnceV2',
 	'viewOnceV2Extension',
 	'isLottie',
+	'favicon',
 	'requestPaymentFrom',
 	'invoiceNote',
 	...EXTRA_CONTENT_KEYS
@@ -73,11 +75,6 @@ const firstContent = (m: WAMessageContent) => {
 	const type = Object.keys(m)[0] as keyof proto.IMessage
 	return m[type] as WithContextInfo | undefined
 }
-
-const hasValidInteractiveHeader = (m: WAMessageContent) =>
-	!!(m.imageMessage || m.videoMessage || m.documentMessage || m.productMessage || m.locationMessage)
-
-const hasValidCarouselHeader = (m: WAMessageContent) => !!(m.imageMessage || m.videoMessage || m.productMessage)
 
 const generateBaseContent = async (
 	message: ArkonMessageContent,
@@ -116,6 +113,20 @@ const generateBaseContent = async (
 	// a lottie sticker also carries the flag on the sticker itself
 	if (message.isLottie && m.stickerMessage) {
 		m.stickerMessage.isLottie = true
+	}
+
+	// the small site icon shown next to a link preview
+	if (message.favicon && m.extendedTextMessage) {
+		const { imageMessage } = await prepareWAMessageMedia({ image: message.favicon }, options)
+		m.extendedTextMessage.faviconMMSMetadata = {
+			thumbnailDirectPath: imageMessage!.directPath,
+			mediaKey: imageMessage!.mediaKey,
+			mediaKeyTimestamp: imageMessage!.mediaKeyTimestamp,
+			thumbnailWidth: 32,
+			thumbnailHeight: 32,
+			thumbnailSha256: imageMessage!.fileSha256,
+			thumbnailEncSha256: imageMessage!.fileEncSha256
+		}
 	}
 
 	// the stock generator adds a reporting secret at the top level; it is added again once the message is wrapped

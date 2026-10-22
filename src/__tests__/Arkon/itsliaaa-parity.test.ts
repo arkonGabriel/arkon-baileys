@@ -43,7 +43,8 @@ const RANDOM_FIELDS = new Set([
 	'attachmentFileEncSha256',
 	'expiryTimestamp',
 	'timestampMs',
-	'senderTimestampMs'
+	'senderTimestampMs',
+	'thumbnailEncSha256'
 ])
 
 const normalize = (value: unknown): unknown => {
@@ -124,6 +125,7 @@ const CASES: [string, Record<string, unknown>][] = [
 		'buttons with an image header',
 		{ image: IMAGE, caption: 'legenda', footer: 'Arkon', buttons: [{ text: 'A', id: '#a' }] }
 	],
+	['text with a site icon (favicon)', { text: 'Veja https://www.arkonlabs.shop', favicon: IMAGE }],
 	['list message', { text: 'descrição', title: 'Título', buttonText: 'Abrir', footer: 'Arkon', sections: SECTIONS }],
 	[
 		'interactive with image, offer and bottom sheet (!interativa)',

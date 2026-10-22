@@ -1,5 +1,6 @@
 import NodeCache from '@cacheable/node-cache'
 import { Boom } from '@hapi/boom'
+import { randomBytes } from 'crypto'
 import { proto } from '../../WAProto/index.js'
 import { getBizBinaryNode, shouldIncludeBizBinaryNode } from '../Arkon/biz-node'
 import { AI_SUPPORT_PAYLOAD, ALBUM_ITEM_DELAY_MS } from '../Arkon/constants'
@@ -30,6 +31,7 @@ import {
 	generateMessageIDV2,
 	generateParticipantHashV2,
 	generateWAMessage,
+	generateWAMessageFromContent,
 	getStatusCodeForMediaRetry,
 	getUrlFromDirectPath,
 	getWAUploadToServer,
@@ -123,45 +125,48 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 	// Prevent race conditions in Signal session encryption by user
 	const encryptionMutex = makeKeyedMutex()
+	// Prevent race conditions in media connection refresh
+	const mediaConnMutex = makeKeyedMutex()
 
 	let mediaConn: Promise<MediaConnInfo> | undefined
 	/** Per-socket media host; updated whenever media_conn is fetched. Defaults to the public WhatsApp host. */
 	let mediaHost: string = DEF_MEDIA_HOST
-	const refreshMediaConn = async (forceGet = false): Promise<MediaConnInfo> => {
-		const media = await mediaConn
-		if (!media || forceGet || new Date().getTime() - media.fetchDate.getTime() > media.ttl * 1000) {
-			mediaConn = (async () => {
-				const result = await query({
-					tag: 'iq',
-					attrs: {
-						type: 'set',
-						xmlns: 'w:m',
-						to: S_WHATSAPP_NET
-					},
-					content: [{ tag: 'media_conn', attrs: {} }]
-				})
-				const mediaConnNode = getBinaryNodeChild(result, 'media_conn')!
-				// TODO: explore full length of data that whatsapp provides
-				const node: MediaConnInfo = {
-					hosts: getBinaryNodeChildren(mediaConnNode, 'host').map(({ attrs }) => ({
-						hostname: attrs.hostname!,
-						maxContentLengthBytes: +attrs.maxContentLengthBytes!
-					})),
-					auth: mediaConnNode.attrs.auth!,
-					ttl: +mediaConnNode.attrs.ttl!,
-					fetchDate: new Date()
-				}
-				logger.debug('fetched media conn')
-				if (node.hosts[0]) {
-					mediaHost = node.hosts[0].hostname
-				}
+	const refreshMediaConn = async (forceGet = false): Promise<MediaConnInfo> =>
+		mediaConnMutex.mutex('media-conn', async () => {
+			const media = await mediaConn
+			if (!media || forceGet || new Date().getTime() - media.fetchDate.getTime() > media.ttl * 1000) {
+				mediaConn = (async () => {
+					const result = await query({
+						tag: 'iq',
+						attrs: {
+							type: 'set',
+							xmlns: 'w:m',
+							to: S_WHATSAPP_NET
+						},
+						content: [{ tag: 'media_conn', attrs: {} }]
+					})
+					const mediaConnNode = getBinaryNodeChild(result, 'media_conn')!
+					// TODO: explore full length of data that whatsapp provides
+					const node: MediaConnInfo = {
+						hosts: getBinaryNodeChildren(mediaConnNode, 'host').map(({ attrs }) => ({
+							hostname: attrs.hostname!,
+							maxContentLengthBytes: +attrs.maxContentLengthBytes!
+						})),
+						auth: mediaConnNode.attrs.auth!,
+						ttl: +mediaConnNode.attrs.ttl!,
+						fetchDate: new Date()
+					}
+					logger.debug('fetched media conn')
+					if (node.hosts[0]) {
+						mediaHost = node.hosts[0].hostname
+					}
 
-				return node
-			})()
-		}
+					return node
+				})()
+			}
 
-		return mediaConn!
-	}
+			return mediaConn!
+		})
 
 	/**
 	 * generic send receipt function
@@ -627,6 +632,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			additionalNodes,
 			useUserDevicesCache,
 			useCachedGroupMetadata,
+			addBizAttributes,
 			statusJidList
 		}: MessageRelayOptions
 	) => {
@@ -678,7 +684,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		}
 
 		await authState.keys.transaction(async () => {
-			const mediaType = getMediaType(message)
+			const innerMessage = normalizeMessageContent(message)
+			const mediaType = innerMessage ? getMediaType(innerMessage) : ''
 			if (mediaType) {
 				extraAttrs['mediatype'] = mediaType
 			}
@@ -686,9 +693,14 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			if (isNewsletter) {
 				const patched = patchMessageBeforeSending ? await patchMessageBeforeSending(message, []) : message
 				const bytes = encodeNewsletterMessage(patched as proto.IMessage)
+				if (additionalNodes?.length) {
+					binaryNodeContent.push(...additionalNodes)
+				}
+
+				// newsletters reject media whose plaintext node does not carry the media type
 				binaryNodeContent.push({
 					tag: 'plaintext',
-					attrs: {},
+					attrs: extraAttrs,
 					content: bytes
 				})
 				const stanza: BinaryNode = {
@@ -706,13 +718,44 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				return
 			}
 
-			if (normalizeMessageContent(message)?.pinInChatMessage || normalizeMessageContent(message)?.reactionMessage) {
+			const isAddOn = !!(
+				innerMessage?.pinInChatMessage ||
+				innerMessage?.keepInChatMessage ||
+				innerMessage?.reactionMessage
+			)
+			// a group status is only rendered as one when the stanza is flagged as such
+			const isGroupStatus = !!(message.groupStatusMessage || message.groupStatusMessageV2)
+			const isPollVote = !!innerMessage?.pollUpdateMessage
+			if (isAddOn || isGroupStatus || isPollVote) {
+				const metaAttrs: BinaryNodeAttributes = {}
+				if (isAddOn) {
+					metaAttrs.content_type = 'add_on'
+				}
+
+				if (isPollVote && !isGroupStatus) {
+					metaAttrs.polltype = 'vote'
+				}
+
+				if (isGroupStatus) {
+					metaAttrs.is_group_status = 'true'
+				}
+
+				binaryNodeContent.push({ tag: 'meta', attrs: metaAttrs })
+			}
+
+			const protocolMessage = innerMessage?.protocolMessage
+			if (
+				isAddOn ||
+				protocolMessage?.memberLabel ||
+				protocolMessage?.editedMessage ||
+				protocolMessage?.mediaNotifyMessage
+			) {
 				extraAttrs['decrypt-fail'] = 'hide' // todo: expand for reactions and other types
 			}
 
-			// a group status is only rendered as one when the stanza is flagged as such
-			if (message.groupStatusMessage || message.groupStatusMessageV2) {
-				binaryNodeContent.push({ tag: 'meta', attrs: { is_group_status: 'true' } })
+			const flowResponseName = innerMessage?.interactiveResponseMessage?.nativeFlowResponseMessage?.name
+			if (flowResponseName) {
+				extraAttrs['native_flow_name'] = flowResponseName
 			}
 
 			if (isGroupOrStatus && !isRetryResend) {
@@ -979,7 +1022,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					attrs: {
 						v: '2',
 						type,
-						count: participant!.count.toString()
+						count: (participant!.count || 0).toString()
 					},
 					content: encryptedContent
 				})
@@ -1101,9 +1144,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				;(stanza.content as BinaryNode[]).push(...additionalNodes)
 			}
 
-			const innerMessage = normalizeMessageContent(message)
-			const hasBizNode = !!additionalNodes?.some(node => node.tag === 'biz')
-			if (innerMessage && !hasBizNode && shouldIncludeBizBinaryNode(innerMessage)) {
+			const hasBizNode = !addBizAttributes && !!additionalNodes?.some(node => node.tag === 'biz')
+			if (innerMessage && !hasBizNode && (addBizAttributes || shouldIncludeBizBinaryNode(innerMessage))) {
 				;(stanza.content as BinaryNode[]).push(getBizBinaryNode(innerMessage))
 			}
 
@@ -1178,6 +1220,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			normalizedMessage.pollCreationMessage ||
 			normalizedMessage.pollCreationMessageV2 ||
 			normalizedMessage.pollCreationMessageV3 ||
+			normalizedMessage.pollCreationMessageV5 ||
 			normalizedMessage.pollUpdateMessage
 		) {
 			return 'poll'
@@ -1210,7 +1253,11 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		} else if (message.liveLocationMessage) {
 			return 'livelocation'
 		} else if (message.stickerMessage) {
-			return 'sticker'
+			return message.stickerMessage.isLottie
+				? '1p_sticker'
+				: message.stickerMessage.isAvatar
+					? 'avatar_sticker'
+					: 'sticker'
 		} else if (message.listMessage) {
 			return 'list'
 		} else if (message.listResponseMessage) {
@@ -1223,12 +1270,19 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			return 'product'
 		} else if (message.interactiveResponseMessage) {
 			return 'native_flow_response'
-		} else if (message.groupInviteMessage) {
+		} else if (message.extendedTextMessage?.matchedText || message.groupInviteMessage) {
 			return 'url'
 		} else if (message.albumMessage) {
 			return 'collection'
 		} else if (message.stickerPackMessage) {
 			return 'sticker_pack'
+		}
+
+		const text = message.extendedTextMessage?.text || message.conversation || ''
+		if (text.includes('://wa.me/c/')) {
+			return 'cataloglink'
+		} else if (text.includes('://wa.me/p/')) {
+			return 'productlink'
 		}
 
 		return ''
@@ -1265,6 +1319,105 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 	const waUploadToServer = getWAUploadToServer(config, refreshMediaConn)
 
 	const waitForMsgMediaUpdate = bindWaitForEvent(ev, 'messages.media-update')
+
+	/**
+	 * Posts a status and mentions it in each chat: groups get a group status mention, contacts a
+	 * status mention. Every member of the mentioned groups can see the status.
+	 */
+	const sendStatusMentions = async (
+		jids: string[],
+		content: AnyMessageContent,
+		options: MiscMessageGenerationOptions = {}
+	) => {
+		const userJid = authState.creds.me!.id
+		const fullMsg = await generateWAMessage('status@broadcast', content, {
+			logger,
+			userJid,
+			upload: waUploadToServer,
+			mediaCache: config.mediaCache,
+			options: config.options,
+			...options,
+			messageId: generateMessageIDV2(userJid)
+		})
+
+		const audience = new Set<string>()
+		for (const id of jids) {
+			if (!isJidGroup(id)) {
+				audience.add(id)
+				continue
+			}
+
+			try {
+				const groupData = (cachedGroupMetadata ? await cachedGroupMetadata(id) : undefined) || (await groupMetadata(id))
+				for (const participant of groupData.participants) {
+					audience.add(participant.id)
+				}
+			} catch (error) {
+				logger.error({ error, jid: id }, 'failed to get group metadata for status mention')
+			}
+		}
+
+		await relayMessage('status@broadcast', fullMsg.message!, {
+			messageId: fullMsg.key.id!,
+			statusJidList: Array.from(audience),
+			additionalNodes: [
+				{
+					tag: 'meta',
+					attrs: {},
+					content: [
+						{
+							tag: 'mentioned_users',
+							attrs: {},
+							content: jids.map(id => ({ tag: 'to', attrs: { jid: id } }))
+						}
+					]
+				}
+			]
+		})
+		if (config.emitOwnEvents) {
+			process.nextTick(async () => {
+				await messageMutex.mutex(() => upsertMessage(fullMsg, 'append'))
+			})
+		}
+
+		for (const id of jids) {
+			const isGroup = isJidGroup(id)
+			const mention = {
+				message: {
+					protocolMessage: {
+						key: fullMsg.key,
+						type: proto.Message.ProtocolMessage.Type.STATUS_MENTION_MESSAGE
+					}
+				}
+			}
+			const mentionMsg = generateWAMessageFromContent(
+				id,
+				{
+					messageContextInfo: { messageSecret: randomBytes(32) },
+					...(isGroup ? { groupStatusMentionMessage: mention } : { statusMentionMessage: mention })
+				},
+				{ userJid }
+			)
+			await relayMessage(id, mentionMsg.message!, {
+				messageId: mentionMsg.key.id!,
+				additionalNodes: [
+					{
+						tag: 'meta',
+						attrs: isGroup ? { is_group_status_mention: 'true' } : { is_status_mention: 'true' }
+					}
+				]
+			})
+			if (config.emitOwnEvents) {
+				process.nextTick(async () => {
+					await messageMutex.mutex(() => upsertMessage(mentionMsg, 'append'))
+				})
+			}
+
+			await delay(options.delayMs ?? ALBUM_ITEM_DELAY_MS)
+		}
+
+		return fullMsg
+	}
 
 	registerSocketEndHandler(() => {
 		if (!config.userDevicesCache && userDevicesCache.close) {
@@ -1344,7 +1497,16 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 			return message
 		},
-		sendMessage: async (jid: string, content: AnyMessageContent, options: MiscMessageGenerationOptions = {}) => {
+		sendStatusMentions,
+		sendMessage: async (
+			jid: string | string[],
+			content: AnyMessageContent,
+			options: MiscMessageGenerationOptions = {}
+		) => {
+			if (Array.isArray(jid)) {
+				return sendStatusMentions(jid, content, options)
+			}
+
 			const userJid = authState.creds.me!.id
 			if (
 				typeof content === 'object' &&
@@ -1392,8 +1554,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				const isQuizMsg = isPollMessage && !!(content.poll as { pollType?: number }).pollType
 				const isAiMsg = 'ai' in content && !!content.ai
 				const isNewsletter = isJidNewsletter(jid)
-				const additionalAttributes: BinaryNodeAttributes = {}
-				const additionalNodes: BinaryNode[] = []
+				const additionalAttributes: BinaryNodeAttributes = { ...options.additionalAttributes }
+				const additionalNodes: BinaryNode[] = [...(options.additionalNodes || [])]
 				// required for delete
 				if (isKeepMsg) {
 					additionalAttributes.edit = '7'
@@ -1490,7 +1652,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 							})
 						}
 
-						await delay(ALBUM_ITEM_DELAY_MS)
+						await delay(options.delayMs ?? ALBUM_ITEM_DELAY_MS)
 					}
 				}
 

@@ -104,10 +104,23 @@ export const MEDIA_PATH_MAP: { [T in MediaType]?: string } = {
 	'sticker-pack': '/mms/sticker-pack',
 	'thumbnail-sticker-pack': '/mms/thumbnail-sticker-pack',
 	'thumbnail-link': '/mms/image',
+	'thumbnail-image': '/mms/image',
+	'thumbnail-video': '/mms/video',
+	'thumbnail-document': '/mms/document',
 	'product-catalog-image': '/product/image',
 	'md-app-state': '',
 	'md-msg-hist': '/mms/md-app-state',
 	'biz-cover-photo': '/pps/biz-cover-photo'
+}
+
+/** newsletter media is uploaded unencrypted, to its own paths */
+export const NEWSLETTER_MEDIA_PATH_MAP: { [T in MediaType]?: string } = {
+	image: '/newsletter/newsletter-image',
+	video: '/newsletter/newsletter-video',
+	document: '/newsletter/newsletter-document',
+	audio: '/newsletter/newsletter-audio',
+	sticker: '/newsletter/newsletter-image',
+	'thumbnail-link': '/newsletter/newsletter-thumbnail-link'
 }
 
 export const MEDIA_HKDF_KEY_MAPPING = {
@@ -128,10 +141,13 @@ export const MEDIA_HKDF_KEY_MAPPING = {
 	'thumbnail-link': 'Link Thumbnail',
 	'md-msg-hist': 'History',
 	'md-app-state': 'App State',
-	'product-catalog-image': '',
+	'product-catalog-image': 'Product Catalog Image',
 	'payment-bg-image': 'Payment Background',
 	ptv: 'Video',
-	'biz-cover-photo': 'Image'
+	'biz-cover-photo': 'Image',
+	location: 'Location',
+	contact: 'Contact',
+	'voip-token': 'Voip Token'
 }
 
 export type MediaType = keyof typeof MEDIA_HKDF_KEY_MAPPING

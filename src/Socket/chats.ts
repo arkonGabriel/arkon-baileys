@@ -409,6 +409,25 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		return getBinaryNodeChildren(listNode, 'item').map(n => n.attrs.jid)
 	}
 
+	/** the LID and the phone number of a user, from whichever one is given */
+	const findUserId = async (pnOrLid: string) => {
+		const normalizedJid = jidNormalizedUser(pnOrLid)
+		const userId: { lid?: string; phoneNumber?: string } = {}
+		if (isPnUser(normalizedJid) || isHostedPnUser(normalizedJid)) {
+			userId.phoneNumber = normalizedJid
+			const lid = await signalRepository.lidMapping.getLIDForPN(normalizedJid)
+			userId.lid = lid ? jidNormalizedUser(lid) : undefined
+		} else if (isLidUser(normalizedJid) || isHostedLidUser(normalizedJid)) {
+			userId.lid = normalizedJid
+			const pn = await signalRepository.lidMapping.getPNForLID(normalizedJid)
+			userId.phoneNumber = pn ? jidNormalizedUser(pn) : undefined
+		} else {
+			throw new Boom('Invalid id input to find user ids', { statusCode: 400 })
+		}
+
+		return userId
+	}
+
 	const updateBlockStatus = async (jid: string, action: 'block' | 'unblock') => {
 		const normalizedJid = jidNormalizedUser(jid)
 		let lid: string
@@ -747,7 +766,12 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	 * type = "preview" for a low res picture
 	 * type = "image for the high res picture"
 	 */
-	const profilePictureUrl = async (jid: string, type: 'preview' | 'image' = 'preview', timeoutMs?: number) => {
+	const profilePictureUrl = async (
+		jid: string,
+		type: 'preview' | 'image' = 'preview',
+		timeoutMs?: number,
+		shouldIncludeTcToken = true
+	) => {
 		// WA Web only includes tctoken for user JIDs (not groups/newsletters)
 		// and never for own profile pic (Chat model for self has no tcToken).
 		// Including tctoken for own JID causes the server to never respond.
@@ -758,7 +782,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 			me && (normalizedJid === jidNormalizedUser(me.id) || (me.lid && normalizedJid === jidNormalizedUser(me.lid)))
 		let tcTokenContent: BinaryNode[] | undefined
 
-		if (serverProps.profilePicPrivacyToken && isUserJid && !isSelf) {
+		if (shouldIncludeTcToken && serverProps.profilePicPrivacyToken && isUserJid && !isSelf) {
 			tcTokenContent = await buildTcTokenFromJid({
 				authState,
 				jid: normalizedJid,
@@ -1515,6 +1539,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		updateGroupsAddPrivacy,
 		updateDefaultDisappearingMode,
 		getBusinessProfile,
+		findUserId,
 		resyncAppState,
 		chatModify,
 		cleanDirtyBits,
