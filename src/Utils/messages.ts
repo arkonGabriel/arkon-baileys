@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto'
 import { promises as fs } from 'fs'
 import { type Transform } from 'stream'
 import { proto } from '../../WAProto/index.js'
+import { generateArkonMessageContent, isArkonMessageContent } from '../Arkon/content'
 import {
 	CALL_AUDIO_PREFIX,
 	CALL_VIDEO_PREFIX,
@@ -396,6 +397,10 @@ export const generateWAMessageContent = async (
 	message: AnyMessageContent,
 	options: MessageContentGenerationOptions
 ) => {
+	if (isArkonMessageContent(message)) {
+		return generateArkonMessageContent(message, options, generateWAMessageContent)
+	}
+
 	let m: WAMessageContent = {}
 	if (hasNonNullishProperty(message, 'text')) {
 		const extContent = { text: message.text } as WATextMessage

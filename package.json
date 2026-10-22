@@ -1,7 +1,7 @@
 {
   "name": "@arkon/baileys",
   "type": "module",
-  "version": "7.0.0-rc14-arkon.1",
+  "version": "7.0.0-rc14-arkon.2",
   "description": "Arkon Baileys: o Baileys (WhiskeySockets) mantido pela Arkon Labs para o Arkon Bot",
   "keywords": [
     "whatsapp",
@@ -44,6 +44,7 @@
     "@cacheable/node-cache": "^1.4.0",
     "@hapi/boom": "^9.1.3",
     "async-mutex": "^0.5.0",
+    "fflate": "^0.8.2",
     "libsignal": "^6.0.0",
     "lru-cache": "^11.1.0",
     "music-metadata": "^11.12.3",
@@ -56,6 +57,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
     "@eslint/js": "^9.31.0",
+    "@itsliaaa/baileys": "0.3.18-final",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.9.0",
     "@types/ws": "^8.0.0",
@@ -79,6 +81,7 @@
     "prettier": "^3.5.3",
     "protobufjs-cli": "^1.1.3",
     "release-it": "^20.0.1",
+    "sharp": "^0.34.5",
     "ts-jest": "^29.4.0",
     "tsc-esm-fix": "^3.1.2",
     "tsx": "^4.20.3",
