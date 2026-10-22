@@ -1,18 +1,18 @@
 {
-  "name": "baileys",
+  "name": "@arkon/baileys",
   "type": "module",
-  "version": "7.0.0-rc14",
-  "description": "A WebSockets library for interacting with WhatsApp Web",
+  "version": "7.0.0-rc14-arkon.1",
+  "description": "Arkon Baileys: o Baileys (WhiskeySockets) mantido pela Arkon Labs para o Arkon Bot",
   "keywords": [
     "whatsapp",
     "automation"
   ],
-  "homepage": "https://github.com/WhiskeySockets/Baileys/",
+  "homepage": "https://github.com/arkonGabriel/arkon-baileys",
   "repository": {
-    "url": "git@github.com:WhiskeySockets/Baileys.git"
+    "url": "git+https://github.com/arkonGabriel/arkon-baileys.git"
   },
   "license": "MIT",
-  "author": "Rajeh Taher",
+  "author": "Arkon Labs (baseado no Baileys de Rajeh Taher/WhiskeySockets)",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "files": [
