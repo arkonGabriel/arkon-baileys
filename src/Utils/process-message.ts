@@ -290,6 +290,102 @@ export function decryptEventResponse(
 	}
 }
 
+type MessageEditContext = {
+	/** the sender of the original message, as a PN JID */
+	originalSenderJid: string
+	originalMsgId: string
+	/** `messageContextInfo.messageSecret` of the original message */
+	editEncKey: Uint8Array
+	editorJid: string
+}
+
+/**
+ * Decrypt a `secretEncryptedMessage` carrying a `MESSAGE_EDIT` payload.
+ *
+ * WhatsApp wraps message edits in an E2EE envelope since May 2026. The key is derived from the
+ * original message's `messageSecret` like poll votes, but the AAD is empty.
+ * @returns the decoded outer `Message`, whose `protocolMessage.editedMessage` holds the new content
+ */
+export function decryptMessageEdit(
+	{ encPayload, encIv }: Pick<proto.Message.ISecretEncryptedMessage, 'encPayload' | 'encIv'>,
+	{ originalSenderJid, originalMsgId, editEncKey, editorJid }: MessageEditContext
+) {
+	const sign = Buffer.concat([
+		Buffer.from(originalMsgId),
+		Buffer.from(originalSenderJid),
+		Buffer.from(editorJid),
+		Buffer.from('Message Edit'),
+		new Uint8Array([1])
+	])
+
+	const key0 = hmacSign(editEncKey, new Uint8Array(32), 'sha256')
+	const decKey = hmacSign(sign, key0, 'sha256')
+
+	const decrypted = aesDecryptGCM(encPayload!, decKey, encIv!, Buffer.alloc(0))
+	return proto.Message.decode(decrypted)
+}
+
+/** the `messages.update` for an encrypted edit, or undefined when it cannot be decrypted */
+const decryptEditUpdate = async (
+	message: WAMessage,
+	secretMessage: proto.Message.ISecretEncryptedMessage,
+	{
+		meId,
+		getMessage,
+		signalRepository,
+		logger
+	}: {
+		meId: string
+		getMessage: SocketConfig['getMessage']
+		signalRepository: SignalRepositoryWithLIDStore
+		logger?: ILogger
+	}
+) => {
+	const targetKey = secretMessage.targetMessageKey!
+	const targetMsg = await getMessage(targetKey)
+	if (!targetMsg) {
+		logger?.warn({ targetKey }, 'original message not found, cannot decrypt message edit')
+		return undefined
+	}
+
+	const editEncKey = targetMsg.messageContextInfo?.messageSecret
+	if (!editEncKey) {
+		logger?.warn({ targetKey }, 'message edit: missing messageSecret on the original message')
+		return undefined
+	}
+
+	const meIdNormalised = jidNormalizedUser(meId)
+	const originalSenderRaw = targetKey.participant || targetKey.remoteJid!
+	const originalSenderPn = isLidUser(originalSenderRaw)
+		? await signalRepository.lidMapping.getPNForLID(originalSenderRaw)
+		: originalSenderRaw
+	const originalSenderJid = getKeyAuthor(
+		{ remoteJid: jidNormalizedUser(originalSenderPn!), fromMe: meIdNormalised === originalSenderPn },
+		meIdNormalised
+	)
+	const decrypted = decryptMessageEdit(secretMessage, {
+		editEncKey,
+		originalSenderJid,
+		originalMsgId: targetKey.id!,
+		editorJid: getKeyAuthor(message.key, meIdNormalised)
+	})
+	const editProtocol = decrypted.protocolMessage
+	if (!editProtocol?.editedMessage) {
+		logger?.warn({ targetKey }, 'decrypted message edit has no editedMessage, skipping')
+		return undefined
+	}
+
+	return {
+		key: { ...message.key, id: targetKey.id },
+		update: {
+			message: { editedMessage: { message: editProtocol.editedMessage } },
+			messageTimestamp: editProtocol.timestampMs
+				? Math.floor(toNumber(editProtocol.timestampMs) / 1000)
+				: toNumber(message.messageTimestamp)
+		}
+	}
+}
+
 const processMessage = async (
 	message: WAMessage,
 	{
@@ -623,6 +719,24 @@ const processMessage = async (
 			}
 		} else {
 			logger?.warn({ creationMsgKey }, 'event creation message not found, cannot decrypt response')
+		}
+	} else if (
+		content?.secretEncryptedMessage?.secretEncType === proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
+	) {
+		// surfaced through the same `messages.update` event as the older protocolMessage edits
+		const targetKey = content.secretEncryptedMessage.targetMessageKey!
+		try {
+			const update = await decryptEditUpdate(message, content.secretEncryptedMessage, {
+				meId,
+				getMessage,
+				signalRepository,
+				logger
+			})
+			if (update) {
+				ev.emit('messages.update', [update])
+			}
+		} catch (err) {
+			logger?.warn({ err, targetKey }, 'failed to decrypt message edit')
 		}
 	} else if (message.messageStubType) {
 		const jid = message.key?.remoteJid!

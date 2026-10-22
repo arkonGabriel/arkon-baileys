@@ -1,8 +1,9 @@
-import type { NewsletterCreateResponse, SocketConfig, WAMediaUpload } from '../Types'
+import { proto } from '../../WAProto/index.js'
+import type { NewsletterCreateResponse, SocketConfig, WAMediaUpload, WAMessage } from '../Types'
 import type { NewsletterMetadata, NewsletterUpdate } from '../Types'
 import { QueryIds, XWAPaths } from '../Types'
 import { generateProfilePicture } from '../Utils/messages-media'
-import { getBinaryNodeChild } from '../WABinary'
+import { type BinaryNode, getBinaryNodeChild, getBinaryNodeChildren, S_WHATSAPP_NET } from '../WABinary'
 import { makeGroupsSocket } from './groups'
 import { executeWMexQuery as genericExecuteWMexQuery } from './mex'
 
@@ -18,8 +19,8 @@ const parseNewsletterCreateResponse = (response: NewsletterCreateResponse): News
 		subscribers: parseInt(thread.subscribers_count, 10),
 		verification: thread.verification,
 		picture: {
-			id: thread.picture.id,
-			directPath: thread.picture.direct_path
+			id: thread.picture?.id,
+			directPath: thread.picture?.direct_path
 		},
 		mute_state: viewer.mute
 	}
@@ -44,6 +45,7 @@ const parseNewsletterMetadata = (result: unknown): NewsletterMetadata | null => 
 export const makeNewsletterSocket = (config: SocketConfig) => {
 	const sock = makeGroupsSocket(config)
 	const { query, generateMessageTag } = sock
+	const { logger } = config
 
 	const executeWMexQuery = <T>(variables: Record<string, unknown>, queryId: string, dataPath: string): Promise<T> => {
 		return genericExecuteWMexQuery<T>(variables, queryId, dataPath, query, generateMessageTag)
@@ -60,8 +62,73 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 		return executeWMexQuery(variables, QueryIds.UPDATE_METADATA, 'xwa2_newsletter_update')
 	}
 
+	/** the newsletter messages, decoded, as WhatsApp Web loads them */
+	const fetchNewsletterMessagesByKey = async (
+		type: 'invite' | 'jid',
+		key: string,
+		count: number,
+		after?: number,
+		before?: number
+	): Promise<WAMessage[]> => {
+		const messagesAttrs: BinaryNode['attrs'] = { count: count.toString(), type, [type === 'jid' ? 'jid' : 'key']: key }
+		if (after) {
+			messagesAttrs.after = after.toString()
+		}
+
+		if (before) {
+			messagesAttrs.before = before.toString()
+		}
+
+		const result = await query({
+			tag: 'iq',
+			attrs: { id: generateMessageTag(), type: 'get', xmlns: 'newsletter', to: S_WHATSAPP_NET },
+			content: [{ tag: 'messages', attrs: messagesAttrs }]
+		})
+		const messagesNode = getBinaryNodeChild(result, 'messages')
+		if (!messagesNode) {
+			return []
+		}
+
+		const newsletterJid = messagesNode.attrs.jid || (type === 'jid' ? key : undefined)
+		const messages: WAMessage[] = []
+		for (const child of getBinaryNodeChildren(messagesNode, 'message')) {
+			const plaintextNode = getBinaryNodeChild(child, 'plaintext')
+			if (!plaintextNode?.content) {
+				continue
+			}
+
+			try {
+				const content =
+					typeof plaintextNode.content === 'string'
+						? Buffer.from(plaintextNode.content, 'binary')
+						: Buffer.from(plaintextNode.content as Uint8Array)
+				messages.push(
+					proto.WebMessageInfo.fromObject({
+						key: {
+							remoteJid: newsletterJid,
+							id: child.attrs.id || child.attrs.server_id,
+							server_id: child.attrs.server_id,
+							fromMe: false
+						},
+						message: proto.Message.decode(content).toJSON(),
+						messageTimestamp: child.attrs.t ? +child.attrs.t : undefined
+					}).toJSON() as WAMessage
+				)
+			} catch (error) {
+				logger.error({ error }, 'failed to decode newsletter message')
+			}
+		}
+
+		return messages
+	}
+
 	return {
 		...sock,
+		executeWMexQuery,
+
+		/** every newsletter this account follows */
+		newsletterSubscribed: () => executeWMexQuery<unknown>({}, QueryIds.SUBSCRIBED, XWAPaths.xwa2_newsletter_subscribed),
+
 		newsletterCreate: async (name: string, description?: string): Promise<NewsletterMetadata> => {
 			const variables = {
 				input: {
@@ -153,7 +220,24 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 			})
 		},
 
-		newsletterFetchMessages: async (jid: string, count: number, since: number, after: number) => {
+		/**
+		 * Two forms: `(jid, count, since, after)` returns the raw `message_updates` node, and the
+		 * @itsliaaa/baileys form `('jid' | 'invite', key, count, after?, before?)` returns decoded messages.
+		 */
+		newsletterFetchMessages: (async (
+			jidOrType: string,
+			countOrKey: number | string,
+			sinceOrCount?: number,
+			after?: number,
+			before?: number
+		) => {
+			if (jidOrType === 'jid' || jidOrType === 'invite') {
+				return fetchNewsletterMessagesByKey(jidOrType, String(countOrKey), sinceOrCount!, after, before)
+			}
+
+			const jid = jidOrType
+			const count = Number(countOrKey)
+			const since = sinceOrCount
 			const messageUpdateAttrs: { count: string; since?: string; after?: string } = {
 				count: count.toString()
 			}
@@ -181,6 +265,9 @@ export const makeNewsletterSocket = (config: SocketConfig) => {
 				]
 			})
 			return result
+		}) as {
+			(jid: string, count: number, since: number, after: number): Promise<BinaryNode>
+			(type: 'invite' | 'jid', key: string, count: number, after?: number, before?: number): Promise<WAMessage[]>
 		},
 
 		subscribeNewsletterUpdates: async (jid: string): Promise<{ duration: string } | null> => {

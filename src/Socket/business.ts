@@ -418,6 +418,7 @@ export const makeBusinessSocket = (config: SocketConfig) => {
 		productDelete,
 		productUpdate,
 		updateBussinesProfile,
+		updateBusinessProfile: updateBussinesProfile,
 		updateCoverPhoto,
 		removeCoverPhoto
 	}
