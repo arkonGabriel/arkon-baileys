@@ -146,4 +146,26 @@ export type ArkonMessageContent = ArkonNativeFlowOptions & {
 	fileName?: string
 	ptv?: boolean
 	gifPlayback?: boolean
+
+	/** send the rest of the object as the message proto, untouched */
+	raw?: boolean
+	isLottie?: boolean
+	/** AI icon on the message; private chats only */
+	ai?: boolean
+	keep?: WAMessageKey
+	type?: number
+	flowReply?: { format?: number; text?: string; name?: string; paramsJson?: string; version?: number }
+	poll?: import('./extra-content').ArkonPollOptions
+	pollResult?: { name: string; votes: { name: string; voteCount: number | string }[]; pollType?: number }
+	pollUpdate?: {
+		key: WAMessageKey
+		vote: proto.Message.IPollEncValue
+		metadata?: proto.Message.IPollUpdateMessageMetadata
+	}
+	product?: Record<string, unknown>
+	businessOwnerJid?: string
+	paymentInviteServiceType?: proto.Message.PaymentInviteMessage.ServiceType
+	orderText?: string
+	requestPaymentFrom?: string
+	invoiceNote?: string
 }

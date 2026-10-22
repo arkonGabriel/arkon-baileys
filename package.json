@@ -1,7 +1,7 @@
 {
   "name": "@arkon/baileys",
   "type": "module",
-  "version": "7.0.0-rc14-arkon.2",
+  "version": "7.0.0-rc14-arkon.3",
   "description": "Arkon Baileys: o Baileys (WhiskeySockets) mantido pela Arkon Labs para o Arkon Bot",
   "keywords": [
     "whatsapp",

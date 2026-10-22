@@ -5,6 +5,7 @@
 import {
 	generateWAMessageContent as liaGenerate,
 	getBizBinaryNode as liaGetBizNode,
+	normalizeMessageContent as liaNormalize,
 	shouldIncludeBizBinaryNode as liaShouldIncludeBiz
 } from '@itsliaaa/baileys'
 import { readFileSync } from 'fs'
@@ -12,10 +13,20 @@ import { join } from 'path'
 import { proto } from '../../../WAProto/index.js'
 import { getBizBinaryNode, shouldIncludeBizBinaryNode } from '../../Arkon/biz-node'
 import type { AnyMessageContent, MessageContentGenerationOptions } from '../../Types'
-import { generateWAMessageContent } from '../../Utils/messages'
+import { generateWAMessageContent, normalizeMessageContent } from '../../Utils/messages'
 import type { BinaryNode } from '../../WABinary'
 
 const IMAGE = readFileSync(join(process.cwd(), 'Media/cat.jpeg'))
+const WEBP = readFileSync(join(process.cwd(), 'Media/octopus.webp'))
+const KEY = { remoteJid: '123@g.us', fromMe: true, id: 'ABCDEF' }
+const PRODUCT = {
+	productId: '1',
+	title: 'Plano Pro',
+	description: 'Aluguel do Arkon Bot',
+	currencyCode: 'BRL',
+	priceAmount1000: 19_900,
+	productImageCount: 1
+}
 
 const RANDOM_FIELDS = new Set([
 	'messageSecret',
@@ -26,7 +37,13 @@ const RANDOM_FIELDS = new Set([
 	'url',
 	'jpegThumbnail',
 	'templateId',
-	'thumbnailUrl'
+	'thumbnailUrl',
+	'token',
+	'attachmentMediaKey',
+	'attachmentFileEncSha256',
+	'expiryTimestamp',
+	'timestampMs',
+	'senderTimestampMs'
 ])
 
 const normalize = (value: unknown): unknown => {
@@ -188,6 +205,64 @@ const CASES: [string, Record<string, unknown>][] = [
 	['ephemeral wrapper', { text: 'some', ephemeral: true }],
 	['view once v2 image', { image: IMAGE, caption: 'uma vez', viewOnceV2: true }],
 	['view once v2 extension', { image: IMAGE, viewOnceV2Extension: true }],
+	['keep in chat', { keep: KEY, type: 1 }],
+	['flow reply', { flowReply: { text: 'ok', name: 'galaxy_message', paramsJson: '{"a":1}' } }],
+	['quiz poll', { poll: { name: 'Quiz', values: ['A', 'B'], pollType: 1, correctAnswer: 'A' } }],
+	[
+		'poll with hidden voters',
+		{ poll: { name: 'Enquete', values: ['A', 'B', 'C'], hideVoter: true, canAddOption: true } }
+	],
+	[
+		'poll result',
+		{
+			pollResult: {
+				name: 'Resultado',
+				votes: [
+					{ name: 'A', voteCount: 3 },
+					{ name: 'B', voteCount: '5' }
+				]
+			}
+		}
+	],
+	['quiz result', { pollResult: { name: 'Quiz', votes: [{ name: 'A', voteCount: 1 }], pollType: 1 } }],
+	['poll update', { pollUpdate: { key: KEY, vote: { encPayload: Buffer.from('x'), encIv: Buffer.from('y') } } }],
+	['payment invite', { paymentInviteServiceType: 1 }],
+	[
+		'order',
+		{ orderText: 'Pedido', thumbnail: IMAGE, orderTitle: 'Arkon', totalCurrencyCode: 'BRL', totalAmount1000: 19_900 }
+	],
+	[
+		'product',
+		{ product: { ...PRODUCT }, businessOwnerJid: '5516999999999@s.whatsapp.net', image: IMAGE, body: 'Compre' }
+	],
+	[
+		'carousel with a product card',
+		{
+			text: 'Loja',
+			cards: [
+				{
+					product: { ...PRODUCT },
+					businessOwnerJid: '5516999999999@s.whatsapp.net',
+					image: IMAGE,
+					caption: 'Plano',
+					nativeFlow: [{ text: 'Ver', id: '#ver' }]
+				}
+			]
+		}
+	],
+	[
+		'request payment',
+		{
+			text: 'Pague o aluguel',
+			requestPaymentFrom: '5516999999999@s.whatsapp.net',
+			currencyCodeIso4217: 'BRL',
+			amount1000: 19_900,
+			amount: { currencyCode: 'BRL', offset: 1000, value: 19_900 }
+		}
+	],
+	['invoice with image', { image: IMAGE, invoiceNote: 'Fatura de outubro' }],
+	['lottie sticker wrapper', { sticker: WEBP, isLottie: true }],
+	['raw proto', { raw: true, conversation: 'mensagem crua' }],
 	[
 		'album header',
 		{
@@ -204,6 +279,19 @@ describe('Arkon builders match @itsliaaa/baileys', () => {
 	it.each(CASES)('%s', async (_, content) => {
 		const { ours, theirs } = await both(content)
 		expect(ours).toEqual(theirs)
+	})
+
+	it('unwraps the same wrappers when reading messages', () => {
+		for (const wrapper of [
+			'lottieStickerMessage',
+			'botForwardedMessage',
+			'statusMentionMessage',
+			'groupMentionedMessage'
+		]) {
+			const message = { [wrapper]: { message: { conversation: 'dentro' } } }
+			expect(normalizeMessageContent(message)).toEqual(liaNormalize(message as never))
+			expect(normalizeMessageContent(message)?.conversation).toBe('dentro')
+		}
 	})
 
 	it('leaves plain messages to the stock generator', async () => {

@@ -2,7 +2,7 @@ import NodeCache from '@cacheable/node-cache'
 import { Boom } from '@hapi/boom'
 import { proto } from '../../WAProto/index.js'
 import { getBizBinaryNode, shouldIncludeBizBinaryNode } from '../Arkon/biz-node'
-import { ALBUM_ITEM_DELAY_MS } from '../Arkon/constants'
+import { AI_SUPPORT_PAYLOAD, ALBUM_ITEM_DELAY_MS } from '../Arkon/constants'
 import { DEFAULT_CACHE_TTLS, WA_DEFAULT_EPHEMERAL } from '../Defaults'
 import type {
 	AnyMessageContent,
@@ -61,6 +61,7 @@ import {
 	isJidBot,
 	isJidGroup,
 	isJidMetaAI,
+	isJidNewsletter,
 	isLidUser,
 	isPnUser,
 	jidDecode,
@@ -1387,10 +1388,16 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				const isEditMsg = 'edit' in content && !!content.edit
 				const isPinMsg = 'pin' in content && !!content.pin
 				const isPollMessage = 'poll' in content && !!content.poll
+				const isKeepMsg = 'keep' in content && !!content.keep
+				const isQuizMsg = isPollMessage && !!(content.poll as { pollType?: number }).pollType
+				const isAiMsg = 'ai' in content && !!content.ai
+				const isNewsletter = isJidNewsletter(jid)
 				const additionalAttributes: BinaryNodeAttributes = {}
 				const additionalNodes: BinaryNode[] = []
 				// required for delete
-				if (isDeleteMsg) {
+				if (isKeepMsg) {
+					additionalAttributes.edit = '7'
+				} else if (isDeleteMsg) {
 					// if the chat is a group, and I am not the author, then delete the message as an admin
 					if (isJidGroup(content.delete?.remoteJid as string) && !content.delete?.fromMe) {
 						additionalAttributes.edit = '8'
@@ -1398,14 +1405,19 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 						additionalAttributes.edit = '7'
 					}
 				} else if (isEditMsg) {
-					additionalAttributes.edit = '1'
+					additionalAttributes.edit = isNewsletter ? '3' : '1'
 				} else if (isPinMsg) {
 					additionalAttributes.edit = '2'
 				} else if (isPollMessage) {
+					if (isQuizMsg && !isNewsletter) {
+						throw new Boom('Quizzes are only allowed in newsletters', { statusCode: 400 })
+					}
+
 					additionalNodes.push({
 						tag: 'meta',
 						attrs: {
-							polltype: 'creation'
+							polltype: isQuizMsg ? 'quiz_creation' : 'creation',
+							...(isNewsletter ? { contenttype: 'text' } : {})
 						}
 					} as BinaryNode)
 				} else if (isEventMsg) {
@@ -1415,6 +1427,17 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 							event_type: 'creation'
 						}
 					} as BinaryNode)
+				} else if (isAiMsg) {
+					// WhatsApp shows the AI label only on 1:1 chats with a bot node and a support payload
+					if (!isPnUser(jid) && !isLidUser(jid)) {
+						throw new Boom('The AI icon is only allowed in private chats', { statusCode: 400 })
+					}
+
+					if (fullMsg.message?.messageContextInfo) {
+						fullMsg.message.messageContextInfo.supportPayload = AI_SUPPORT_PAYLOAD
+					}
+
+					additionalNodes.push({ tag: 'bot', attrs: { biz_bot: '1' } })
 				}
 
 				await relayMessage(jid, fullMsg.message!, {
