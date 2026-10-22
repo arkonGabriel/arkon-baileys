@@ -1,0 +1,79 @@
+name: Sync fork (mensal)
+
+# Todo mês puxa as novidades do Baileys oficial (WhiskeySockets/Baileys):
+# - se juntar sem conflito, abre um PR automático pra revisar e aprovar;
+# - se der conflito, abre um aviso (issue) com os arquivos pra resolver à mão;
+# - se já estiver em dia, não faz nada.
+# Também dá pra rodar na hora pelo botão "Run workflow" (workflow_dispatch).
+
+on:
+  schedule:
+    - cron: '0 6 1 * *' # dia 1 de cada mês, 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (histórico completo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node e Corepack
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Identidade do git
+        run: |
+          git config user.name "arkon-sync[bot]"
+          git config user.email "arkon-sync@users.noreply.github.com"
+
+      - name: Rodar a sincronização
+        id: sync
+        run: node scripts/sync-upstream.mjs
+        env:
+          UPSTREAM_URL: https://github.com/WhiskeySockets/Baileys.git
+          UPSTREAM_BRANCH: master
+          BASE_BRANCH: master
+
+      - name: Abrir PR (quando juntou limpo)
+        if: steps.sync.outputs.result == 'clean'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          BRANCH="${{ steps.sync.outputs.branch }}"
+          COMMITS="${{ steps.sync.outputs.commits }}"
+          git push -u origin "$BRANCH"
+          if ! gh pr create \
+              --base master --head "$BRANCH" \
+              --title "Sync fork: Baileys oficial ($(date +%Y-%m-%d))" \
+              --body "Sincronização automática com WhiskeySockets/Baileys. Entraram ${COMMITS} commit(s) do oficial, juntados sem conflito, preservando o código Arkon. Confira a CI (build, testes, lint) e aprove o merge."; then
+            echo "Não consegui abrir o PR sozinho (a opção 'Allow GitHub Actions to create and approve pull requests' pode estar desligada em Settings → Actions)."
+            gh issue create \
+              --title "Sync fork: branch pronto, falta abrir o PR ($(date +%Y-%m-%d))" \
+              --body "O branch \`$BRANCH\` já foi enviado com ${COMMITS} commit(s) do Baileys oficial (merge limpo). Abra o PR manualmente: https://github.com/${{ github.repository }}/compare/master...$BRANCH" || true
+          fi
+
+      - name: Abrir aviso (quando deu conflito)
+        if: steps.sync.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONFLICTS=$(printf '%s' "${{ steps.sync.outputs.conflicts }}" | tr ',' '\n')
+          BODY=$(printf 'A sincronização com o Baileys oficial deu conflito e precisa ser resolvida à mão.\n\nArquivos em conflito:\n%s\n\nComo resolver: rode `node scripts/sync-upstream.mjs` localmente (sem SYNC_DRY_RUN), resolva os conflitos, rode `yarn lint`, `yarn test` e `yarn build`, e abra um PR do branch de sync.' "$CONFLICTS")
+          gh issue create \
+            --title "Sync fork: resolução manual necessária ($(date +%Y-%m-%d))" \
+            --body "$BODY"
+
+      - name: Nada a fazer (já atualizado)
+        if: steps.sync.outputs.result == 'uptodate'
+        run: echo "O fork já está em dia com o Baileys oficial."

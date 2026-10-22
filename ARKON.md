@@ -30,6 +30,37 @@ const sock = makeWASocket({ version /* , ... */ })
 // depois de um 405: waVersion.invalidate() e reconectar
 ```
 
-## Manter atualizada
+## Manter atualizada (sincronizar com o Baileys oficial)
 
-No GitHub, botão **Sync fork** puxa o oficial. Depois rode `yarn lint`, `yarn test` e `yarn build`.
+Como o fork tem código próprio no `master`, o botão **Sync fork** do GitHub dá
+conflito. Por isso a sincronização é feita de um jeito que preserva tudo o que é
+Arkon:
+
+**Automático, todo mês.** O robô `.github/workflows/sync-fork.yml` roda no dia 1
+de cada mês (e também pelo botão **Run workflow**, na aba Actions → "Sync fork
+(mensal)"). Ele:
+
+- puxa as novidades do Baileys oficial (`WhiskeySockets/Baileys`);
+- se juntar sem conflito, **abre um PR automático** — é só conferir a CI (build,
+  testes, lint) e aprovar o merge;
+- se der conflito, **abre um aviso (issue)** listando os arquivos pra resolver à mão;
+- se já estiver em dia, não faz nada.
+
+> Pra ele conseguir abrir o PR sozinho, deixe ligada a opção
+> **Settings → Actions → General → "Allow GitHub Actions to create and approve
+> pull requests"**. Se estiver desligada, ele ainda envia o branch e abre uma
+> issue com o link pra você abrir o PR manualmente.
+
+**Na hora, manualmente.** Rode `node scripts/sync-upstream.mjs` (aceita
+`SYNC_DRY_RUN=1` pra só simular). Ele configura o remote `upstream`, baixa o
+oficial e cria o branch `arkon/sync-upstream-AAAA-MM-DD` com o merge. Depois:
+
+```bash
+yarn install
+yarn lint
+yarn test
+yarn build
+```
+
+e abra um PR desse branch. Havendo conflito, o script avisa quais arquivos e
+desfaz o merge pra você resolver com calma.
